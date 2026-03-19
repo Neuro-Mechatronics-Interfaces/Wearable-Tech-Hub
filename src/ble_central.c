@@ -27,6 +27,7 @@ typedef struct {
     uint8_t          addr[6];
     uint8_t          addr_type;
     uint8_t          num_instances;
+    char             name[32];   // device name from scan / advertisement
 } slot_t;
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -387,6 +388,15 @@ bool ble_central_pair(const char *addr_str) {
     s_slots[slot].addr_type  = (uint8_t)BD_ADDR_TYPE_LE_PUBLIC;
     s_slots[slot].con_handle = HCI_CON_HANDLE_INVALID;
     s_slots[slot].state      = SLOT_CONNECTING;
+    s_slots[slot].name[0]    = '\0';
+    // Copy device name from scan results if available
+    for (int i = 0; i < s_scan_count; i++) {
+        if (memcmp(s_scan[i].addr, addr, 6) == 0) {
+            strncpy(s_slots[slot].name, s_scan[i].name, sizeof(s_slots[slot].name) - 1);
+            s_slots[slot].name[sizeof(s_slots[slot].name) - 1] = '\0';
+            break;
+        }
+    }
     gap_connect(addr, BD_ADDR_TYPE_LE_PUBLIC);
     return true;
 }
@@ -402,7 +412,7 @@ bool ble_central_unpair(const char *addr_str) {
 }
 
 void ble_central_list(void (*print)(const char *)) {
-    char buf[80];
+    char buf[128];
     for (int i = 0; i < MAX_DEVICES; i++) {
         if (s_slots[i].state == SLOT_IDLE) continue;
         char addr_str[18];
@@ -410,8 +420,10 @@ void ble_central_list(void (*print)(const char *)) {
         const char *st = s_slots[i].state == SLOT_CONNECTED   ? "connected"   :
                          s_slots[i].state == SLOT_CONNECTING  ? "connecting"  :
                          s_slots[i].state == SLOT_DISCOVERING ? "discovering" : "?";
-        snprintf(buf, sizeof(buf), "slot%d  %s  %s  (%d svc)\r\n",
-                 i, addr_str, st, (int)s_slots[i].num_instances);
+        // Include device type so the configurator frontend can display the right icon.
+        const char *dtype = (s_merger && s_merger->devices[i].is_mouse) ? "mouse" : "gamepad";
+        snprintf(buf, sizeof(buf), "paired[%d]: %s  \"%s\"  type:%s  %s\r\n",
+                 i, addr_str, s_slots[i].name, dtype, st);
         print(buf);
     }
 }

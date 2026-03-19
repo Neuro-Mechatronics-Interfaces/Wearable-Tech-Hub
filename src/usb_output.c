@@ -7,7 +7,7 @@
 #include "tusb.h"
 
 // ── Module state ──────────────────────────────────────────────────────────────
-static output_profile_t s_profile = PROFILE_GAMEPAD;
+static output_profile_t s_profile = PROFILE_SWITCH;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

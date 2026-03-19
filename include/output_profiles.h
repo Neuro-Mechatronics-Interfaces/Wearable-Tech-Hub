@@ -4,61 +4,96 @@
 #include "hid_merger.h"
 
 // ── Output profiles ───────────────────────────────────────────────────────────
-// Three output profiles are supported.  Exactly one is active at a time.
-// Switching profiles requires a USB re-enumeration (the Pico briefly
-// disconnects its D+ pull-up, then reconnects).
+// Three profiles, each matching the USB HID report layout of a real console
+// controller.  Exactly one is active at a time; switching requires a brief
+// USB re-enumeration so the host sees the updated descriptor.
 
 typedef enum {
-    PROFILE_GAMEPAD  = 0,  // Xbox-compatible 16-button gamepad + 6 axes + hat
-    PROFILE_MOUSE    = 1,  // 5-button relative mouse + scroll wheel
-    PROFILE_JOYSTICK = 2,  // 32-button + 8 absolute axes + hat (extended)
+    PROFILE_SWITCH   = 0,  // Nintendo Switch Pro Controller style
+    PROFILE_PS5      = 1,  // Sony DualSense style
+    PROFILE_XBOX     = 2,  // Xbox One / Series style
 } output_profile_t;
 
 // ── Report structures ─────────────────────────────────────────────────────────
+//
+// Button bit assignments (bit 0 = button 1 = lowest bit of buttons field):
+//
+//   PROFILE_SWITCH (7 bytes)
+//     Bit  0: B (south)       Bit  1: A (east)
+//     Bit  2: Y (west)        Bit  3: X (north)
+//     Bit  4: L               Bit  5: R
+//     Bit  6: ZL              Bit  7: ZR
+//     Bit  8: Minus           Bit  9: Plus
+//     Bit 10: L3              Bit 11: R3
+//     Bit 12: Home            Bit 13: Capture
+//     [bits 14-15 padding]
+//
+//   PROFILE_PS5 (9 bytes)
+//     Bit  0: Cross  ×        Bit  1: Circle  ○
+//     Bit  2: Square □        Bit  3: Triangle △
+//     Bit  4: L1              Bit  5: R1
+//     Bit  6: L2 (digital)    Bit  7: R2 (digital)
+//     Bit  8: Create          Bit  9: Options
+//     Bit 10: L3              Bit 11: R3
+//     Bit 12: PS              Bit 13: Touchpad click
+//     [bits 14-15 padding]
+//
+//   PROFILE_XBOX (13 bytes)
+//     Bit  0: A (south)       Bit  1: B (east)
+//     Bit  2: X (west)        Bit  3: Y (north)
+//     Bit  4: LB              Bit  5: RB
+//     Bit  6: LT (digital)    Bit  7: RT (digital)
+//     Bit  8: View            Bit  9: Menu
+//     Bit 10: L3              Bit 11: R3
+//     Bit 12: Guide           Bit 13: Share
+//     [bits 14-15 padding]
 
-// PROFILE_GAMEPAD — 9 bytes, no report ID prefix
+// PROFILE_SWITCH — 7 bytes, no report ID
+// Sticks uint8 [0,255], 128 = center.  ZL/ZR are digital buttons only.
 typedef struct __attribute__((packed)) {
-    uint16_t buttons;  // bits 0-15 → button 1-16
-    int8_t   lx;       // Left stick X
-    int8_t   ly;       // Left stick Y
-    int8_t   rx;       // Right stick X  (HID RX / Rx usage)
-    int8_t   ry;       // Right stick Y  (HID RY / Ry usage)
-    uint8_t  lt;       // Left trigger   (HID Z, unsigned 0-255)
-    uint8_t  rt;       // Right trigger  (HID RZ, unsigned 0-255)
-    uint8_t  hat;      // low nibble: 0-7 direction, 0xF = centre; high = pad
-} gamepad_report_t;
+    uint16_t buttons;   // bits 0-13 as above; bits 14-15 padding
+    uint8_t  hat;       // bits [3:0]: 0-7 direction, 0xF = center; bits [7:4] padding
+    uint8_t  lx;        // left stick X  (0-255, 128 = center)
+    uint8_t  ly;        // left stick Y  (0-255, 128 = center)
+    uint8_t  rx;        // right stick X (0-255, 128 = center)
+    uint8_t  ry;        // right stick Y (0-255, 128 = center)
+} switch_report_t;
 
-// PROFILE_MOUSE — 4 bytes, no report ID prefix
+// PROFILE_PS5 — 9 bytes, no report ID
+// Sticks and analog triggers uint8 [0,255], 128 = center for sticks.
 typedef struct __attribute__((packed)) {
-    uint8_t buttons;   // bits 0-4 → buttons 1-5; bits 5-7 = pad
-    int8_t  x;
-    int8_t  y;
-    int8_t  wheel;
-} mouse_report_t;
+    uint8_t  lx;        // left stick X  (0-255, 128 = center)
+    uint8_t  ly;        // left stick Y  (0-255, 128 = center)
+    uint8_t  rx;        // right stick X (0-255, 128 = center)
+    uint8_t  ry;        // right stick Y (0-255, 128 = center)
+    uint8_t  lt;        // L2 analog     (0-255)
+    uint8_t  rt;        // R2 analog     (0-255)
+    uint16_t buttons;   // bits 0-13 as above; bits 14-15 padding
+    uint8_t  hat;       // bits [3:0]: 0-7 direction, 0xF = center; bits [7:4] padding
+} ps5_report_t;
 
-// PROFILE_JOYSTICK — 13 bytes, no report ID prefix
+// PROFILE_XBOX — 13 bytes, no report ID
+// Sticks int16 [-32768, 32767].  Triggers uint8 [0, 255].
 typedef struct __attribute__((packed)) {
-    uint32_t buttons;  // bits 0-31 → buttons 1-32
-    int8_t   x;
-    int8_t   y;
-    int8_t   z;
-    int8_t   rx;
-    int8_t   ry;
-    int8_t   rz;
-    int8_t   slider;
-    int8_t   dial;
-    uint8_t  hat;      // nibble, same encoding as gamepad
-} joystick_report_t;
+    uint16_t buttons;   // bits 0-13 as above; bits 14-15 padding
+    uint8_t  lt;        // LT analog (0-255)
+    uint8_t  rt;        // RT analog (0-255)
+    int16_t  lx;        // left stick X  (-32768..32767)
+    int16_t  ly;        // left stick Y  (-32768..32767)
+    int16_t  rx;        // right stick X (-32768..32767)
+    int16_t  ry;        // right stick Y (-32768..32767)
+    uint8_t  hat;       // bits [3:0]: 0-7 direction, 0xF = center; bits [7:4] padding
+} xbox_report_t;
 
 // ── HID descriptor blobs ──────────────────────────────────────────────────────
-extern const uint8_t gamepad_hid_descriptor[];
-extern const uint16_t gamepad_hid_descriptor_len;
+extern const uint8_t  switch_hid_descriptor[];
+extern const uint16_t switch_hid_descriptor_len;
 
-extern const uint8_t mouse_hid_descriptor[];
-extern const uint16_t mouse_hid_descriptor_len;
+extern const uint8_t  ps5_hid_descriptor[];
+extern const uint16_t ps5_hid_descriptor_len;
 
-extern const uint8_t joystick_hid_descriptor[];
-extern const uint16_t joystick_hid_descriptor_len;
+extern const uint8_t  xbox_hid_descriptor[];
+extern const uint16_t xbox_hid_descriptor_len;
 
 // ── API ───────────────────────────────────────────────────────────────────────
 

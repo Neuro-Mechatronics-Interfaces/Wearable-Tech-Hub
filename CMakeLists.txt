@@ -1,3 +1,33 @@
+# ── Standalone preamble ───────────────────────────────────────────────────────
+# When this file IS the top-level CMakeLists.txt (cloned standalone), we handle
+# the Pico SDK bootstrap ourselves.  When included via add_subdirectory() from a
+# parent project the parent has already called pico_sdk_init() so we skip it.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.18)
+
+    option(HUB_BUILD "Build the Mudra BLE HID hub firmware" ON)
+
+    if(NOT DEFINED PICO_SDK_PATH)
+        if(DEFINED ENV{PICO_SDK_PATH})
+            set(PICO_SDK_PATH $ENV{PICO_SDK_PATH})
+        else()
+            message(FATAL_ERROR
+                "PICO_SDK_PATH is not set.\n"
+                "Export it as an environment variable or pass -DPICO_SDK_PATH=<path>.")
+        endif()
+    endif()
+
+    include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+
+    project(mudra_hub C CXX ASM)
+    set(CMAKE_C_STANDARD   11)
+    set(CMAKE_CXX_STANDARD 17)
+
+    pico_sdk_init()
+endif()
+
+# ── Target ────────────────────────────────────────────────────────────────────
+
 add_executable(mudra_hub
     src/main.c
     src/ble_central.c
@@ -54,7 +84,7 @@ pico_add_extra_outputs(mudra_hub)
 
 # ── Fallback UF2 when picotool is not installed ───────────────────────────────
 # pico_add_extra_outputs only emits .uf2 when picotool is found.  When it is
-# absent we run firmware/uf2_gen.py (pure Python, no extra deps) ourselves.
+# absent we run uf2_gen.py (pure Python, no extra deps) ourselves.
 if(NOT TARGET picotool)
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
@@ -66,7 +96,7 @@ if(NOT TARGET picotool)
         endif()
         add_custom_command(TARGET mudra_hub POST_BUILD
             COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_LIST_DIR}/../uf2_gen.py
+                ${CMAKE_CURRENT_LIST_DIR}/uf2_gen.py
                 $<TARGET_FILE_DIR:mudra_hub>/mudra_hub.bin
                 $<TARGET_FILE_DIR:mudra_hub>/mudra_hub.uf2
                 0x10000000

@@ -1,6 +1,7 @@
 #include "hid_merger.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // ── Natural semantic for each output role (fallback when binding is AUTO) ─────
 static const int8_t s_role_default_sem[OUT_ROLE_COUNT] = {
@@ -84,13 +85,24 @@ static bool device_has_sem(const device_state_t *dev, int sem_id) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+// ── Helper: refresh m->has_mouse from active device flags ─────────────────────
+static void refresh_has_mouse(merger_state_t *m) {
+    m->has_mouse = false;
+    for (int i = 0; i < MAX_DEVICES; i++)
+        if (m->devices[i].active && m->devices[i].is_mouse) { m->has_mouse = true; return; }
+}
+
 void merger_init(merger_state_t *m) {
     memset(m, 0, sizeof(*m));
-    m->axis_strategy = AXIS_MERGE_ADDITIVE;
-    // All bindings default to SLOT_ANY / SEM_AUTO
+    m->axis_strategy    = AXIS_MERGE_ADDITIVE;
+    m->mouse_sensitivity = 1;
     for (int i = 0; i < OUT_ROLE_COUNT; i++) {
         m->bindings[i].slot   = BINDING_SLOT_ANY;
         m->bindings[i].sem_id = BINDING_SEM_AUTO;
+    }
+    for (int i = 0; i < OUT_BTN_COUNT; i++) {
+        m->btn_bindings[i].slot    = BINDING_SLOT_ANY;
+        m->btn_bindings[i].sem_btn = BINDING_SEM_AUTO;
     }
 }
 
@@ -117,7 +129,9 @@ void merger_build_field_map(merger_state_t *m, int slot,
         e->logical_max = f->logical_max;
         e->report_id   = f->report_id;
     }
-    dev->active = true;
+    dev->is_mouse = (desc->collection_usage == HID_USAGE_MOUSE);
+    dev->active   = true;
+    refresh_has_mouse(m);
 }
 
 void merger_feed_report(merger_state_t *m, int slot,
@@ -153,20 +167,59 @@ void merger_feed_report(merger_state_t *m, int slot,
 void merger_disconnect(merger_state_t *m, int slot) {
     if (slot < 0 || slot >= MAX_DEVICES) return;
     memset(&m->devices[slot], 0, sizeof(m->devices[slot]));
+    refresh_has_mouse(m);
 }
 
-uint32_t merger_buttons(const merger_state_t *m) {
-    uint32_t result = 0;
-    for (int d = 0; d < MAX_DEVICES; d++) {
-        if (!m->devices[d].active) continue;
-        for (int b = 0; b < SEM_BUTTON_COUNT; b++)
-            if (m->devices[d].values[SEM_BUTTON_BASE + b]) result |= (1u << b);
+// Internal: resolve one output button role through its binding + merge strategy.
+static bool merger_get_button(const merger_state_t *m, output_btn_t btn) {
+    if (btn < 0 || btn >= OUT_BTN_COUNT) return false;
+    const button_binding_t *b = &m->btn_bindings[btn];
+    int idx = (b->sem_btn == BINDING_SEM_AUTO) ? (int)btn : (int)b->sem_btn;
+    int sem = SEM_BUTTON_BASE + idx;
+    if (idx < 0 || idx >= SEM_BUTTON_COUNT) return false;
+
+    if (b->slot != BINDING_SLOT_ANY) {
+        int slot = b->slot;
+        if (slot < 0 || slot >= MAX_DEVICES || !m->devices[slot].active) return false;
+        return m->devices[slot].values[sem] != 0;
+    }
+
+    // Merge across all active devices that expose this semantic button
+    switch (m->axis_strategy) {
+        case AXIS_MERGE_ADDITIVE:
+        case AXIS_MERGE_LAST:
+            for (int d = 0; d < MAX_DEVICES; d++) {
+                if (!m->devices[d].active || !device_has_sem(&m->devices[d], sem)) continue;
+                if (m->devices[d].values[sem]) return true;
+            }
+            return false;
+        case AXIS_MERGE_PRIORITY:
+            for (int d = 0; d < MAX_DEVICES; d++) {
+                if (!m->devices[d].active || !device_has_sem(&m->devices[d], sem)) continue;
+                return m->devices[d].values[sem] != 0;  // first active device wins
+            }
+            return false;
+    }
+    return false;
+}
+
+uint16_t merger_get_buttons_word(const merger_state_t *m) {
+    uint16_t result = 0;
+    for (int b = 0; b < OUT_BTN_COUNT; b++) {
+        if (merger_get_button(m, (output_btn_t)b))
+            result |= (uint16_t)(1u << b);
     }
     return result;
 }
 
 int8_t merger_axis(const merger_state_t *m, int sem_id) {
     if (sem_id < 0 || sem_id >= SEM_COUNT) return 0;
+
+    // Relative mouse axes bypass the absolute-value path and use the
+    // pre-flushed per-frame deltas from merger_flush_mouse_axes().
+    if (sem_id == SEM_REL_X) return m->mouse_delta[0];
+    if (sem_id == SEM_REL_Y) return m->mouse_delta[1];
+
     int32_t sum = 0; bool any = false; int32_t priority = 0;
     int32_t last = 0; bool last_set = false;
 
@@ -240,10 +293,32 @@ void merger_consume_rel(merger_state_t *m,
     m->rel_accum[0] = m->rel_accum[1] = m->rel_accum[2] = 0;
 }
 
+void merger_flush_mouse_axes(merger_state_t *m) {
+    if (!m->has_mouse) {
+        m->mouse_delta[0] = m->mouse_delta[1] = 0;
+        m->rel_accum[0] = m->rel_accum[1] = m->rel_accum[2] = 0;
+        return;
+    }
+    int s = (m->mouse_sensitivity > 0) ? (int)m->mouse_sensitivity : 1;
+    m->mouse_delta[0] = clamp8(m->rel_accum[0] / s);
+    m->mouse_delta[1] = clamp8(m->rel_accum[1] / s);
+    m->rel_accum[0] = m->rel_accum[1] = m->rel_accum[2] = 0;
+}
+
+bool merger_has_mouse(const merger_state_t *m) {
+    return m->has_mouse;
+}
+
 void merger_set_binding(merger_state_t *m, output_role_t role, int slot, int sem_id) {
     if (role < 0 || role >= OUT_ROLE_COUNT) return;
     m->bindings[role].slot   = (int8_t)slot;
     m->bindings[role].sem_id = (int8_t)sem_id;
+}
+
+void merger_set_btn_binding(merger_state_t *m, output_btn_t btn, int slot, int sem_btn) {
+    if (btn < 0 || btn >= OUT_BTN_COUNT) return;
+    m->btn_bindings[btn].slot    = (int8_t)slot;
+    m->btn_bindings[btn].sem_btn = (int8_t)sem_btn;
 }
 
 // ── CLI helpers ───────────────────────────────────────────────────────────────
@@ -298,6 +373,27 @@ int sem_axis_from_name(const char *name) {
     if (strcmp(name, "rely")    == 0) return SEM_REL_Y;
     if (strcmp(name, "relwheel")== 0) return SEM_REL_WHEEL;
     return -1;
+}
+
+static const char *s_btn_role_names[OUT_BTN_COUNT] = {
+    "btn_south", "btn_east",  "btn_west",    "btn_north",
+    "btn_l1",    "btn_r1",    "btn_l2d",     "btn_r2d",
+    "btn_select","btn_start", "btn_l3",      "btn_r3",
+    "btn_home",  "btn_capture",
+};
+
+int output_btn_from_name(const char *name) {
+    for (int i = 0; i < OUT_BTN_COUNT; i++)
+        if (strcmp(s_btn_role_names[i], name) == 0) return i;
+    return -1;
+}
+
+int sem_btn_from_name(const char *name) {
+    // Accept "btn1"…"btn32" → 0-based index
+    if (strncmp(name, "btn", 3) != 0) return -1;
+    int n = atoi(name + 3);
+    if (n < 1 || n > SEM_BUTTON_COUNT) return -1;
+    return n - 1;  // 0-based
 }
 
 // ── Device field description ──────────────────────────────────────────────────
@@ -356,15 +452,27 @@ void merger_describe_device(const merger_state_t *m, int slot,
         i++;
     }
 
-    // Show which output roles are bound to this slot
+    // Show which axis roles are bound to this slot
     bool any_bound = false;
     for (int r = 0; r < OUT_ROLE_COUNT; r++) {
         if (m->bindings[r].slot == (int8_t)slot) {
-            if (!any_bound) { print("    bindings:\r\n"); any_bound = true; }
+            if (!any_bound) { print("    axis bindings:\r\n"); any_bound = true; }
             int sem = m->bindings[r].sem_id == BINDING_SEM_AUTO
                       ? (int)s_role_default_sem[r] : (int)m->bindings[r].sem_id;
             snprintf(buf, sizeof(buf), "      %s → slot%d.%s\r\n",
                      s_role_names[r], slot, sem_name(sem));
+            print(buf);
+        }
+    }
+    // Show which button roles are bound to this slot
+    bool any_btn_bound = false;
+    for (int b = 0; b < OUT_BTN_COUNT; b++) {
+        if (m->btn_bindings[b].slot == (int8_t)slot) {
+            if (!any_btn_bound) { print("    button bindings:\r\n"); any_btn_bound = true; }
+            int idx = m->btn_bindings[b].sem_btn == BINDING_SEM_AUTO
+                      ? b : (int)m->btn_bindings[b].sem_btn;
+            snprintf(buf, sizeof(buf), "      %s → slot%d.btn%d\r\n",
+                     s_btn_role_names[b], slot, idx + 1);
             print(buf);
         }
     }

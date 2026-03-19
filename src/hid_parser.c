@@ -157,9 +157,17 @@ int hid_parse_descriptor(const uint8_t *data, uint16_t len,
             break;
 
         // ── Main items ───────────────────────────────────────────────────────
-        case TAG_COLLECTION:
-        case TAG_END_COLLECTION:
+        case TAG_COLLECTION: {
+            uint32_t ctype = item_u32(vp, size);
+            // Application collection (type 0x01): record the first one seen so
+            // callers can identify Mouse (0x02), Game Pad (0x05), etc.
+            if (ctype == 0x01u && desc->collection_usage == 0 && l.usage_count > 0)
+                desc->collection_usage = l.usages[0];
             // Reset local state; no fields emitted
+            memset(&l, 0, sizeof(l));
+            break;
+        }
+        case TAG_END_COLLECTION:
             memset(&l, 0, sizeof(l));
             break;
 

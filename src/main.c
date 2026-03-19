@@ -59,15 +59,18 @@ static void cmd_help(void) {
         "  unpair <AA:BB:CC:DD:EE:FF>\r\n"
         "  list\r\n"
         "  devices                          describe axes/buttons per connected device\r\n"
-        "  profile gamepad|mouse|joystick   switch USB HID output profile\r\n"
+        "  profile switch|ps5|xbox          switch USB HID output profile\r\n"
         "  axis_merge add|priority|last     axis merge strategy\r\n"
-        "  bind show                        show current axis output bindings\r\n"
-        "  bind <role> <slot> <axis>        e.g.  bind lx 0 x\r\n"
-        "  bind <role> * <axis>             bind role to ANY slot (use merge strategy)\r\n"
+        "  bind show                        show current axis + button bindings\r\n"
+        "  bind <role> <slot|*> <axis>      e.g.  bind lx 0 x\r\n"
+        "  bind <btn_role> <slot|*> <btnN>  e.g.  bind btn_south 0 btn1\r\n"
+        "  bind lx * relx                   map mouse X to left stick X\r\n"
         "  bind <role> default              reset role to default binding\r\n"
         "  bind reset                       reset ALL bindings to defaults\r\n"
         "  roles                            list valid output role names\r\n"
+        "  btns                             list valid output button role names\r\n"
         "  axes                             list valid axis names\r\n"
+        "  mouse_sens <1-32>                mouse delta divisor (1=full, 2=half …)\r\n"
         "  reset                            software reboot\r\n"
     );
 }
@@ -78,8 +81,8 @@ static void cmd_status(void) {
         s_merger.axis_strategy == AXIS_MERGE_ADDITIVE ? "additive" :
         s_merger.axis_strategy == AXIS_MERGE_PRIORITY ? "priority" : "last";
     const char *prof_s =
-        usb_output_get_profile() == PROFILE_GAMEPAD  ? "gamepad"  :
-        usb_output_get_profile() == PROFILE_MOUSE    ? "mouse"    : "joystick";
+        usb_output_get_profile() == PROFILE_SWITCH ? "switch" :
+        usb_output_get_profile() == PROFILE_PS5    ? "ps5"    : "xbox";
     snprintf(buf, sizeof(buf), "profile: %-10s  axis_merge: %s\r\n", prof_s, merge_s);
     cdc_puts(buf);
     ble_central_list(cdc_puts);
@@ -118,24 +121,38 @@ static void cmd_bind_show(void) {
     static const char *role_names[] = {
         "lx","ly","rx","ry","lt","rt","hat","slider","dial","relx","rely","wheel"
     };
+    static const char *btn_role_names[] = {
+        "btn_south","btn_east","btn_west","btn_north",
+        "btn_l1","btn_r1","btn_l2d","btn_r2d",
+        "btn_select","btn_start","btn_l3","btn_r3",
+        "btn_home","btn_capture",
+    };
+
+    cdc_puts("-- axis roles --\r\n");
     cdc_puts("output role   slot   axis\r\n");
-    cdc_puts("──────────────────────────\r\n");
+    cdc_puts("─────────────────────────\r\n");
     for (int r = 0; r < OUT_ROLE_COUNT; r++) {
         const axis_binding_t *b = &s_merger.bindings[r];
         char slot_s[8];
-        if (b->slot == BINDING_SLOT_ANY)
-            snprintf(slot_s, sizeof(slot_s), "*");
-        else
-            snprintf(slot_s, sizeof(slot_s), "%d", (int)b->slot);
+        if (b->slot == BINDING_SLOT_ANY) snprintf(slot_s, sizeof(slot_s), "*");
+        else                             snprintf(slot_s, sizeof(slot_s), "%d", (int)b->slot);
+        const char *axis_s = (b->sem_id == BINDING_SEM_AUTO) ? "(default)" : sem_name(b->sem_id);
+        snprintf(buf, sizeof(buf), "  %-10s  %-5s  %s\r\n", role_names[r], slot_s, axis_s);
+        cdc_puts(buf);
+    }
 
-        const char *axis_s;
-        if (b->sem_id == BINDING_SEM_AUTO)
-            axis_s = "(default)";
-        else
-            axis_s = sem_name(b->sem_id);
-
-        snprintf(buf, sizeof(buf), "  %-10s  %-5s  %s\r\n",
-                 role_names[r], slot_s, axis_s);
+    cdc_puts("-- button roles --\r\n");
+    cdc_puts("output btn    slot   src btn\r\n");
+    cdc_puts("─────────────────────────────\r\n");
+    for (int b = 0; b < OUT_BTN_COUNT; b++) {
+        const button_binding_t *bb = &s_merger.btn_bindings[b];
+        char slot_s[8];
+        if (bb->slot == BINDING_SLOT_ANY) snprintf(slot_s, sizeof(slot_s), "*");
+        else                              snprintf(slot_s, sizeof(slot_s), "%d", (int)bb->slot);
+        char src_s[8];
+        if (bb->sem_btn == BINDING_SEM_AUTO) snprintf(src_s, sizeof(src_s), "(default)");
+        else                                  snprintf(src_s, sizeof(src_s), "btn%d", (int)bb->sem_btn + 1);
+        snprintf(buf, sizeof(buf), "  %-12s  %-5s  %s\r\n", btn_role_names[b], slot_s, src_s);
         cdc_puts(buf);
     }
 }
@@ -193,11 +210,11 @@ static void process_line(char *line) {
         cmd_devices();
 
     } else if (strcmp(argv[0], "profile") == 0) {
-        if (argc < 2) { cdc_puts("usage: profile gamepad|mouse|joystick\r\n"); return; }
+        if (argc < 2) { cdc_puts("usage: profile switch|ps5|xbox\r\n"); return; }
         output_profile_t p;
-        if      (strcmp(argv[1], "gamepad")  == 0) p = PROFILE_GAMEPAD;
-        else if (strcmp(argv[1], "mouse")    == 0) p = PROFILE_MOUSE;
-        else if (strcmp(argv[1], "joystick") == 0) p = PROFILE_JOYSTICK;
+        if      (strcmp(argv[1], "switch") == 0) p = PROFILE_SWITCH;
+        else if (strcmp(argv[1], "ps5")    == 0) p = PROFILE_PS5;
+        else if (strcmp(argv[1], "xbox")   == 0) p = PROFILE_XBOX;
         else { cdc_puts("unknown profile\r\n"); return; }
         usb_output_set_profile(p);
         cdc_puts("ok\r\n");
@@ -215,11 +232,17 @@ static void process_line(char *line) {
     } else if (strcmp(argv[0], "roles") == 0) {
         cdc_puts("lx  ly  rx  ry  lt  rt  hat  slider  dial  relx  rely  wheel\r\n");
 
+    } else if (strcmp(argv[0], "btns") == 0) {
+        cdc_puts("btn_south  btn_east  btn_west  btn_north\r\n"
+                 "btn_l1  btn_r1  btn_l2d  btn_r2d\r\n"
+                 "btn_select  btn_start  btn_l3  btn_r3\r\n"
+                 "btn_home  btn_capture\r\n");
+
     } else if (strcmp(argv[0], "axes") == 0) {
         cdc_puts("x  y  z  rx  ry  rz  slider  dial  wheel  hat  relx  rely  relwheel\r\n");
 
     } else if (strcmp(argv[0], "bind") == 0) {
-        if (argc < 2) { cdc_puts("usage: bind show | bind reset | bind <role> <slot|*> <axis> | bind <role> default\r\n"); return; }
+        if (argc < 2) { cdc_puts("usage: bind show | bind reset | bind <role> <slot|*> <axis|btnN> | bind <role> default\r\n"); return; }
 
         if (strcmp(argv[1], "show") == 0) {
             cmd_bind_show();
@@ -231,34 +254,66 @@ static void process_line(char *line) {
             for (int r = 0; r < OUT_ROLE_COUNT; r++)
                 merger_set_binding(&s_merger, (output_role_t)r,
                                    BINDING_SLOT_ANY, BINDING_SEM_AUTO);
+            for (int b = 0; b < OUT_BTN_COUNT; b++)
+                merger_set_btn_binding(&s_merger, (output_btn_t)b,
+                                       BINDING_SLOT_ANY, BINDING_SEM_AUTO);
             spin_unlock(sl, irq);
             cdc_puts("all bindings reset\r\n");
             return;
         }
 
-        // bind <role> <slot|*> <axis>   OR   bind <role> default
-        if (argc < 3) { cdc_puts("usage: bind <role> <slot|*> <axis>\r\n"); return; }
+        if (argc < 3) { cdc_puts("usage: bind <role> <slot|*> <axis|btnN>\r\n"); return; }
 
-        int role = output_role_from_name(argv[1]);
-        if (role < 0) { cdc_puts("unknown role — type 'roles'\r\n"); return; }
+        // Try axis role first, then button role
+        int axis_role = output_role_from_name(argv[1]);
+        int btn_role  = output_btn_from_name(argv[1]);
 
-        int slot, sem_id;
+        if (axis_role < 0 && btn_role < 0) {
+            cdc_puts("unknown role — type 'roles' or 'btns'\r\n"); return;
+        }
+
+        int slot;
         if (strcmp(argv[2], "default") == 0) {
-            slot   = BINDING_SLOT_ANY;
-            sem_id = BINDING_SEM_AUTO;
-        } else {
-            if (argc < 4) { cdc_puts("usage: bind <role> <slot|*> <axis>\r\n"); return; }
-            slot = (strcmp(argv[2], "*") == 0) ? BINDING_SLOT_ANY : atoi(argv[2]);
-            if (slot != BINDING_SLOT_ANY && (slot < 0 || slot >= MAX_DEVICES)) {
-                cdc_puts("slot must be 0-3 or *\r\n"); return;
-            }
-            sem_id = sem_axis_from_name(argv[3]);
-            if (sem_id < 0) { cdc_puts("unknown axis — type 'axes'\r\n"); return; }
+            spin_lock_t *sl = spin_lock_instance(HUB_SPINLOCK_ID);
+            uint32_t irq    = spin_lock_blocking(sl);
+            if (axis_role >= 0)
+                merger_set_binding(&s_merger, (output_role_t)axis_role,
+                                   BINDING_SLOT_ANY, BINDING_SEM_AUTO);
+            else
+                merger_set_btn_binding(&s_merger, (output_btn_t)btn_role,
+                                       BINDING_SLOT_ANY, BINDING_SEM_AUTO);
+            spin_unlock(sl, irq);
+            cdc_puts("ok\r\n");
+            return;
+        }
+
+        if (argc < 4) { cdc_puts("usage: bind <role> <slot|*> <axis|btnN>\r\n"); return; }
+        slot = (strcmp(argv[2], "*") == 0) ? BINDING_SLOT_ANY : atoi(argv[2]);
+        if (slot != BINDING_SLOT_ANY && (slot < 0 || slot >= MAX_DEVICES)) {
+            cdc_puts("slot must be 0-3 or *\r\n"); return;
         }
 
         spin_lock_t *sl = spin_lock_instance(HUB_SPINLOCK_ID);
         uint32_t irq    = spin_lock_blocking(sl);
-        merger_set_binding(&s_merger, (output_role_t)role, slot, sem_id);
+        if (axis_role >= 0) {
+            int sem_id = sem_axis_from_name(argv[3]);
+            if (sem_id < 0) { spin_unlock(sl, irq); cdc_puts("unknown axis — type 'axes'\r\n"); return; }
+            merger_set_binding(&s_merger, (output_role_t)axis_role, slot, sem_id);
+        } else {
+            int sem_btn = sem_btn_from_name(argv[3]);
+            if (sem_btn < 0) { spin_unlock(sl, irq); cdc_puts("unknown button — use btn1..btn32\r\n"); return; }
+            merger_set_btn_binding(&s_merger, (output_btn_t)btn_role, slot, sem_btn);
+        }
+        spin_unlock(sl, irq);
+        cdc_puts("ok\r\n");
+
+    } else if (strcmp(argv[0], "mouse_sens") == 0) {
+        if (argc < 2) { cdc_puts("usage: mouse_sens <1-32>\r\n"); return; }
+        int s = atoi(argv[1]);
+        if (s < 1 || s > 32) { cdc_puts("out of range (1-32)\r\n"); return; }
+        spin_lock_t *sl = spin_lock_instance(HUB_SPINLOCK_ID);
+        uint32_t irq    = spin_lock_blocking(sl);
+        s_merger.mouse_sensitivity = (uint8_t)s;
         spin_unlock(sl, irq);
         cdc_puts("ok\r\n");
 
@@ -393,6 +448,14 @@ static void hid_dispatch_task(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - s_last_report_ms < HID_REPORT_INTERVAL_MS) return;
     s_last_report_ms = now;
+
+    // Convert accumulated mouse relative deltas to per-frame scaled joystick values.
+    // Must run under the spinlock so BLE core 1 can't append to rel_accum mid-read.
+    spin_lock_t *sl = spin_lock_instance(HUB_SPINLOCK_ID);
+    uint32_t irq    = spin_lock_blocking(sl);
+    merger_flush_mouse_axes(&s_merger);
+    spin_unlock(sl, irq);
+
     usb_output_send(&s_merger, HUB_SPINLOCK_ID);
 }
 

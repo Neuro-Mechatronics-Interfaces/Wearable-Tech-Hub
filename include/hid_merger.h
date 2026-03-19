@@ -36,7 +36,7 @@ typedef enum {
     AXIS_MERGE_LAST      = 2,  // Last non-zero write wins
 } axis_merge_t;
 
-// ── Output roles ──────────────────────────────────────────────────────────────
+// ── Output axis roles ─────────────────────────────────────────────────────────
 // Named output positions in the USB HID report.  Each can be bound to a
 // specific device slot + semantic input; unbound roles use axis_strategy.
 typedef enum {
@@ -55,7 +55,30 @@ typedef enum {
     OUT_ROLE_COUNT,
 } output_role_t;
 
-// Sentinel values for axis_binding_t fields
+// ── Output button roles ───────────────────────────────────────────────────────
+// Positional (layout-based) names so cross-platform mapping makes sense.
+// Default binding for OUT_BTN_X is SEM_BUTTON_BASE + X (i.e. HID button X+1).
+// All three profiles share the same button-bit ordering:
+//   bit 0 = south (A / × / B), bit 1 = east (B / ○ / A), ...
+typedef enum {
+    OUT_BTN_SOUTH   = 0,  // A (Xbox) / × (PS5) / B (Switch)
+    OUT_BTN_EAST    = 1,  // B (Xbox) / ○ (PS5) / A (Switch)
+    OUT_BTN_WEST    = 2,  // X (Xbox) / □ (PS5) / Y (Switch)
+    OUT_BTN_NORTH   = 3,  // Y (Xbox) / △ (PS5) / X (Switch)
+    OUT_BTN_L1      = 4,  // LB / L1 / L
+    OUT_BTN_R1      = 5,  // RB / R1 / R
+    OUT_BTN_L2_DIG  = 6,  // LT digital / L2 digital / ZL
+    OUT_BTN_R2_DIG  = 7,  // RT digital / R2 digital / ZR
+    OUT_BTN_SELECT  = 8,  // View / Create / Minus
+    OUT_BTN_START   = 9,  // Menu / Options / Plus
+    OUT_BTN_L3      = 10, // L3 (stick click) — same on all profiles
+    OUT_BTN_R3      = 11,
+    OUT_BTN_HOME    = 12, // Guide / PS / Home
+    OUT_BTN_CAPTURE = 13, // Share / Touchpad click / Capture
+    OUT_BTN_COUNT   = 14,
+} output_btn_t;
+
+// Sentinel values shared by both binding types
 #define BINDING_SLOT_ANY   -1   // use axis_strategy across all active devices
 #define BINDING_SEM_AUTO   -1   // resolve from the role's natural semantic
 
@@ -63,6 +86,13 @@ typedef struct {
     int8_t slot;    // 0–3 or BINDING_SLOT_ANY
     int8_t sem_id;  // SEM_* constant or BINDING_SEM_AUTO
 } axis_binding_t;
+
+// Button binding: sem_btn is a 0-based button index (0 = HID Button 1).
+// BINDING_SEM_AUTO maps output button N to SEM_BUTTON_BASE + N.
+typedef struct {
+    int8_t slot;    // 0–3 or BINDING_SLOT_ANY
+    int8_t sem_btn; // 0–31 (button index) or BINDING_SEM_AUTO
+} button_binding_t;
 
 // ── Per-device field map ──────────────────────────────────────────────────────
 typedef struct {
@@ -80,6 +110,7 @@ typedef struct {
 
 typedef struct {
     bool              active;
+    bool              is_mouse;           // true when HID descriptor is a Mouse collection
     field_map_entry_t field_map[MAX_FIELD_MAP_ENTRIES];
     int               field_map_count;
     int32_t           values[SEM_COUNT];
@@ -89,10 +120,15 @@ typedef struct {
 #define MAX_DEVICES 4
 
 typedef struct {
-    device_state_t devices[MAX_DEVICES];
-    axis_merge_t   axis_strategy;
-    int32_t        rel_accum[3];              // accumulated relative deltas
-    axis_binding_t bindings[OUT_ROLE_COUNT];  // per-role output binding
+    device_state_t   devices[MAX_DEVICES];
+    axis_merge_t     axis_strategy;
+    int32_t          rel_accum[3];                   // accumulated relative deltas (X,Y,wheel)
+    axis_binding_t   bindings[OUT_ROLE_COUNT];       // per-axis-role output binding
+    button_binding_t btn_bindings[OUT_BTN_COUNT];    // per-button-role output binding
+    // ── Mouse support ────────────────────────────────────────────────────────
+    bool             has_mouse;                      // any active slot is a mouse
+    int8_t           mouse_delta[2];                 // per-frame scaled X/Y (filled by merger_flush_mouse_axes)
+    uint8_t          mouse_sensitivity;              // raw delta divisor: 1=full, 2=half, …, 8=slow
 } merger_state_t;
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -107,8 +143,9 @@ void    merger_feed_report(merger_state_t *m, int slot,
 
 void    merger_disconnect(merger_state_t *m, int slot);
 
-// Merged button state: OR across all active devices, 32 bits.
-uint32_t merger_buttons(const merger_state_t *m);
+// Merged button word: applies per-role bindings and merge strategy.
+// Returns a 14-bit mask (bit N = OUT_BTN_N is pressed).
+uint16_t merger_get_buttons_word(const merger_state_t *m);
 
 // Raw semantic axis (unbound), normalised to [-127,127].
 int8_t  merger_axis(const merger_state_t *m, int sem_id);
@@ -124,10 +161,24 @@ uint8_t merger_hat(const merger_state_t *m);
 void    merger_consume_rel(merger_state_t *m,
                             int8_t *rel_x, int8_t *rel_y, int8_t *rel_wheel);
 
+// Scale accumulated mouse relative deltas by mouse_sensitivity and store the
+// result in mouse_delta[].  Clears rel_accum.  Call once per HID output frame,
+// under the spinlock, before profile_build_report() / usb_output_send().
+// After this call, merger_get_output(m, OUT_REL_X/Y) returns the mouse delta.
+void    merger_flush_mouse_axes(merger_state_t *m);
+
+// Returns true if at least one active slot has is_mouse set.
+bool    merger_has_mouse(const merger_state_t *m);
+
 // Set an explicit axis binding.  Pass BINDING_SLOT_ANY / BINDING_SEM_AUTO to
 // clear a binding back to default behaviour.
 void    merger_set_binding(merger_state_t *m, output_role_t role,
                             int slot, int sem_id);
+
+// Set an explicit button binding.  sem_btn is 0-based button index (0 = HID
+// Button 1).  Pass BINDING_SLOT_ANY / BINDING_SEM_AUTO for default behaviour.
+void    merger_set_btn_binding(merger_state_t *m, output_btn_t btn,
+                                int slot, int sem_btn);
 
 // Print a human-readable description of device[slot]'s field map and current
 // bindings to the supplied print callback (one line per call).
@@ -146,3 +197,11 @@ int output_role_from_name(const char *name);
 // Convert a semantic axis name string ("x", "z", "rx", …) to a SEM_AXIS_*
 // constant.  Returns -1 if not found.
 int sem_axis_from_name(const char *name);
+
+// Convert an output button role name ("btn_south", "btn_l1", …) to output_btn_t.
+// Returns -1 if not found.
+int output_btn_from_name(const char *name);
+
+// Convert a semantic button name ("btn1"…"btn32") to a 0-based button index.
+// Returns -1 if not found or out of range.
+int sem_btn_from_name(const char *name);

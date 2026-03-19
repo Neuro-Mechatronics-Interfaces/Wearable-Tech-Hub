@@ -7,7 +7,13 @@
 #define HID_PAGE_BUTTON           0x09u
 #define HID_PAGE_CONSUMER         0x0Cu
 
-// ── Generic Desktop usages (page 0x01) ───────────────────────────────────────
+// ── Generic Desktop top-level collection usages ───────────────────────────────
+#define HID_USAGE_POINTER   0x01u  // Pointer (Physical collection)
+#define HID_USAGE_MOUSE     0x02u  // Mouse (Application collection)
+#define HID_USAGE_JOYSTICK  0x04u  // Joystick
+#define HID_USAGE_GAMEPAD   0x05u  // Game Pad
+
+// ── Generic Desktop axis usages (page 0x01) ───────────────────────────────────
 #define HID_USAGE_X         0x30u
 #define HID_USAGE_Y         0x31u
 #define HID_USAGE_Z         0x32u
@@ -46,6 +52,7 @@ typedef struct {
 typedef struct {
     hid_field_t fields[HID_MAX_FIELDS];
     int         count;
+    uint32_t    collection_usage; // top-level Application Collection usage (HID_USAGE_MOUSE etc.)
 } hid_descriptor_t;
 
 // ── API ───────────────────────────────────────────────────────────────────────
