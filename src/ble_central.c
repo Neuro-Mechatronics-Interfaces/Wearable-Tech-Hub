@@ -353,7 +353,9 @@ void ble_central_init(merger_state_t *shared_merger, uint32_t spinlock_num) {
     gap_set_scan_parameters(0, 0x0030, 0x0030);
     // conn_scan_interval, conn_scan_window, conn_interval_min, conn_interval_max,
     // conn_latency, supervision_timeout, min_ce_length, max_ce_length
-    gap_set_connection_parameters(0x0008, 0x0018, 0, 0, 0x000C, 0x0028, 0, 0);
+    // conn_interval_min=0x0006 (7.5ms), conn_interval_max=0x0018 (30ms),
+    // conn_latency=0, supervision_timeout=0x00C8 (2000ms)
+    gap_set_connection_parameters(0x0008, 0x0018, 0x0006, 0x0018, 0, 0x00C8, 0, 0);
 
     hci_power_control(HCI_POWER_ON);
 }
@@ -383,21 +385,23 @@ bool ble_central_pair(const char *addr_str) {
     int slot = find_free_slot();
     if (slot < 0) { printf("[ble] no free slot\n"); return false; }
 
-    pairing_store_set_addr(slot, addr, (uint8_t)BD_ADDR_TYPE_LE_PUBLIC);
+    // Look up addr_type from scan results (Switch/8BitDo use LE_RANDOM, not LE_PUBLIC)
+    uint8_t addr_type = (uint8_t)BD_ADDR_TYPE_LE_PUBLIC;  // fallback
     memcpy(s_slots[slot].addr, addr, 6);
-    s_slots[slot].addr_type  = (uint8_t)BD_ADDR_TYPE_LE_PUBLIC;
     s_slots[slot].con_handle = HCI_CON_HANDLE_INVALID;
     s_slots[slot].state      = SLOT_CONNECTING;
     s_slots[slot].name[0]    = '\0';
-    // Copy device name from scan results if available
     for (int i = 0; i < s_scan_count; i++) {
         if (memcmp(s_scan[i].addr, addr, 6) == 0) {
+            addr_type = s_scan[i].addr_type;
             strncpy(s_slots[slot].name, s_scan[i].name, sizeof(s_slots[slot].name) - 1);
             s_slots[slot].name[sizeof(s_slots[slot].name) - 1] = '\0';
             break;
         }
     }
-    gap_connect(addr, BD_ADDR_TYPE_LE_PUBLIC);
+    pairing_store_set_addr(slot, addr, addr_type);
+    s_slots[slot].addr_type = addr_type;
+    gap_connect(addr, (bd_addr_type_t)addr_type);
     return true;
 }
 
