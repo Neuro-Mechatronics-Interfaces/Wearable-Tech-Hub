@@ -176,7 +176,7 @@ cmake -S . -B build -G Ninja -DPICO_SDK_PATH=C:\path\to\pico-sdk
 cmake --build build
 ```
 
-Flash `build/mudra_hub.uf2` via BOOTSEL drag-and-drop.
+Flash `build/wth_firmware.uf2` via BOOTSEL drag-and-drop.
 
 ### PowerShell build helper
 

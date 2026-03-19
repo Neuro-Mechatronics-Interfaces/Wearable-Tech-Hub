@@ -191,7 +191,7 @@ function Resolve-RequiredDir {
 
 function Find-Uf2 {
     param([string]$BuildDirectory)
-    $hits = @(Get-ChildItem -Path $BuildDirectory -Filter "mudra_hub.uf2" -Recurse -ErrorAction SilentlyContinue |
+    $hits = @(Get-ChildItem -Path $BuildDirectory -Filter "wth_firmware.uf2" -Recurse -ErrorAction SilentlyContinue |
               Sort-Object FullName)
     if ($hits.Count -gt 0) { return $hits[0].FullName }
     return $null
@@ -290,7 +290,7 @@ if ($null -ne $uf2) {
 } else {
     Write-Host "==> Build finished" -ForegroundColor Green
     $artifacts = @(Get-ChildItem -Path $BuildDir -Recurse -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -match '^mudra_hub\.(elf|bin|hex)$' })
+                   Where-Object { $_.Name -match '^wth_firmware\.(elf|bin|hex)$' })
     foreach ($a in $artifacts) {
         Write-Host "    $($a.Extension.TrimStart('.').ToUpper()): $($a.FullName)" -ForegroundColor Green
     }
