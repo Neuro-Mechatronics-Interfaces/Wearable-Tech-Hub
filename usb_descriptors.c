@@ -67,7 +67,11 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 // the report descriptor callback during enumeration.
 #define HID_REPORT_DESC_LEN 0  // filled dynamically
 
-static const uint8_t s_config_desc[] = {
+// Non-const so usb_desc_set_hid_report_len() can patch wDescriptorLength before
+// enumeration.  If this were const it would live in flash and the write would be
+// silently ignored (or fault), leaving wDescriptorLength = 0 and Windows would
+// never request the report descriptor.
+static uint8_t s_config_desc[] = {
     // Configuration
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
@@ -83,6 +87,25 @@ static const uint8_t s_config_desc[] = {
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
     return s_config_desc;
+}
+
+// Patch the wDescriptorLength field inside the HID class descriptor that is
+// embedded in s_config_desc.  Must be called before tusb_init() (initial value)
+// and before tud_connect() after a profile change (updated value).
+// Without this, wDescriptorLength stays 0 and Windows never requests the report
+// descriptor, so the device is never recognised as a game controller.
+void usb_desc_set_hid_report_len(uint16_t len) {
+    uint8_t *p   = s_config_desc;
+    uint8_t *end = p + sizeof(s_config_desc);
+    while (p < end && p[0] > 0) {
+        if (p[1] == 0x21u) {   // HID class descriptor type (bDescriptorType)
+            // wDescriptorLength is at offset 7 within the HID class descriptor
+            p[7] = (uint8_t)(len & 0xFFu);
+            p[8] = (uint8_t)(len >> 8);
+            return;
+        }
+        p += p[0];
+    }
 }
 
 // ── String descriptors ────────────────────────────────────────────────────────

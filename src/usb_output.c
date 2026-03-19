@@ -6,12 +6,23 @@
 #include "hardware/sync.h"
 #include "tusb.h"
 
+// Declared in usb_descriptors.c — patches wDescriptorLength in the config
+// descriptor buffer so the host requests the correct number of bytes when
+// fetching the HID report descriptor during enumeration.
+extern void usb_desc_set_hid_report_len(uint16_t len);
+
 // ── Module state ──────────────────────────────────────────────────────────────
 static output_profile_t s_profile = PROFILE_SWITCH;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 void usb_output_init(void) {
+    // Patch the HID report descriptor length into the config descriptor before
+    // TinyUSB starts so the host gets the correct wDescriptorLength on first
+    // enumeration.
+    uint16_t desc_len;
+    usb_output_hid_descriptor(&desc_len);
+    usb_desc_set_hid_report_len(desc_len);
     tusb_init();
 }
 
@@ -27,11 +38,19 @@ void usb_output_set_profile(output_profile_t p) {
     if (p == s_profile) return;
     s_profile = p;
 
+    // Patch the config descriptor with the new report descriptor length before
+    // reconnecting, so the host requests the right number of bytes.
+    uint16_t desc_len;
+    usb_output_hid_descriptor(&desc_len);
+    usb_desc_set_hid_report_len(desc_len);
+
     // Force USB re-enumeration so the host sees the updated HID descriptor.
-    // TinyUSB provides tud_disconnect() / tud_connect() for this purpose.
+    // 500 ms gap gives Windows enough time to fully process the disconnection
+    // before the device reappears; 20 ms was too short and caused silent
+    // re-enumeration failures on Windows.
     printf("[usb] re-enumerating for profile %d\n", (int)p);
     tud_disconnect();
-    sleep_ms(20);
+    sleep_ms(500);
     tud_connect();
 }
 
