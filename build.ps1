@@ -46,6 +46,11 @@
     Skip importing the Visual Studio developer environment.  Use when already
     running inside a VS developer prompt.
 
+.PARAMETER SkipPublish
+    Do not copy the built UF2 to the release folder and do not increment the
+    VERSION file.  Useful for test / Debug builds where you don't want to cut
+    a new numbered release.
+
 .EXAMPLE
     # Minimal — uses PICO_SDK_PATH / PICO_TOOLCHAIN_PATH env vars:
     .\build.ps1
@@ -78,7 +83,8 @@ param(
     [switch]$ConfigureOnly,
     [switch]$Clean,
     [string]$VsInstallationPath,
-    [switch]$NoVsDevShell
+    [switch]$NoVsDevShell,
+    [switch]$SkipPublish
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,6 +96,21 @@ $script:RepoRoot = $PSScriptRoot   # This script lives at the repo root
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $script:RepoRoot "build"
 }
+
+# ── Version ───────────────────────────────────────────────────────────────────
+# VERSION is a plain-text file containing "major.minor" (e.g. "1.1").
+# Each successful build publishes the UF2 under that version tag and then
+# auto-increments the minor component so the next build gets a fresh label.
+# To start a new major (e.g. v2.0) simply edit VERSION before building.
+$script:VersionFile = Join-Path $script:RepoRoot "VERSION"
+if (Test-Path $script:VersionFile) {
+    $script:CurrentVersion = (Get-Content $script:VersionFile -Raw).Trim()
+} else {
+    $script:CurrentVersion = "1.0"
+}
+$script:VerParts = $script:CurrentVersion -split '\.'
+$script:VerMajor = [int]$script:VerParts[0]
+$script:VerMinor = [int]$script:VerParts[1]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 function Write-Step {
@@ -243,6 +264,8 @@ Write-Host "Generator           = $Generator"           -ForegroundColor DarkGra
 Write-Host "BuildType           = $BuildType"           -ForegroundColor DarkGray
 Write-Host "BuildDir            = $BuildDir"            -ForegroundColor DarkGray
 Write-Host "GpioButtons         = $($GpioButtons.IsPresent)" -ForegroundColor DarkGray
+Write-Host "Version             = $script:CurrentVersion" -ForegroundColor DarkGray
+Write-Host "SkipPublish         = $($SkipPublish.IsPresent)" -ForegroundColor DarkGray
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 if ($Clean -and (Test-Path $BuildDir)) {
@@ -287,6 +310,33 @@ if ($null -ne $uf2) {
     Write-Host "    UF2: $uf2" -ForegroundColor Green
     Write-Host ""
     Write-Host "Flash: hold BOOTSEL, plug in USB, then copy the UF2 to the RPI-RP2 drive." -ForegroundColor DarkGray
+
+    if (-not $SkipPublish) {
+        # ── Publish release ───────────────────────────────────────────────────
+        # Copy the UF2 into the configurator's public/release/ tree if that
+        # directory exists (i.e. this repo is checked out as a submodule inside
+        # the parent Mudra repo).  Silently skipped when cloned standalone.
+        $releaseRoot = Join-Path $script:RepoRoot "..\configurator\frontend\public\release"
+        $releaseRoot = [System.IO.Path]::GetFullPath($releaseRoot)
+        if (Test-Path $releaseRoot) {
+            Write-Step "Publishing release v$script:CurrentVersion"
+            $releaseDir = Join-Path $releaseRoot "v$script:CurrentVersion"
+            if (-not (Test-Path $releaseDir)) {
+                New-Item -ItemType Directory -Path $releaseDir | Out-Null
+            }
+            $dest = Join-Path $releaseDir "wth_firmware.uf2"
+            Copy-Item -Path $uf2 -Destination $dest -Force
+            Write-Host "    Published: $dest" -ForegroundColor Green
+        } else {
+            Write-Host "    (release publish skipped — configurator tree not found)" -ForegroundColor DarkGray
+        }
+
+        # ── Increment minor version ───────────────────────────────────────────
+        $nextVersion = "$script:VerMajor.$($script:VerMinor + 1)"
+        Set-Content -Path $script:VersionFile -Value $nextVersion -NoNewline
+        Write-Host "    Version $script:CurrentVersion → $nextVersion (VERSION updated)" -ForegroundColor Cyan
+        Write-Host "    Edit VERSION to change the major version or reset the counter." -ForegroundColor DarkGray
+    }
 } else {
     Write-Host "==> Build finished" -ForegroundColor Green
     $artifacts = @(Get-ChildItem -Path $BuildDir -Recurse -ErrorAction SilentlyContinue |
@@ -295,6 +345,6 @@ if ($null -ne $uf2) {
         Write-Host "    $($a.Extension.TrimStart('.').ToUpper()): $($a.FullName)" -ForegroundColor Green
     }
     if ($artifacts.Count -eq 0) {
-        Write-Host "    No mudra_hub artifacts found under '$BuildDir'." -ForegroundColor Yellow
+        Write-Host "    No wth_firmware artifacts found under '$BuildDir'." -ForegroundColor Yellow
     }
 }
