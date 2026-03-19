@@ -28,6 +28,11 @@ static merger_state_t s_merger;
 static int  s_scan_select_idx = -1;   // which scan result is "selected" by button
 static bool s_scanning        = false;
 
+// ── Input monitor state ────────────────────────────────────────────────────────
+static bool     s_monitor_on  = false;
+static uint32_t s_monitor_ms  = 0;
+#define MONITOR_INTERVAL_MS  50
+
 // ── Core 1: BLE stack ─────────────────────────────────────────────────────────
 static void core1_entry(void) {
     multicore_lockout_victim_init();  // allows core 0 to pause us during flash writes
@@ -71,6 +76,7 @@ static void cmd_help(void) {
         "  btns                             list valid output button role names\r\n"
         "  axes                             list valid axis names\r\n"
         "  mouse_sens <1-32>                mouse delta divisor (1=full, 2=half …)\r\n"
+        "  monitor on|off                    stream merged input state every 50 ms\r\n"
         "  reset                            software reboot\r\n"
     );
 }
@@ -155,6 +161,36 @@ static void cmd_bind_show(void) {
         snprintf(buf, sizeof(buf), "  %-12s  %-5s  %s\r\n", btn_role_names[b], slot_s, src_s);
         cdc_puts(buf);
     }
+}
+
+static void cmd_monitor_task(void) {
+    if (!s_monitor_on || !tud_cdc_connected()) return;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - s_monitor_ms < MONITOR_INTERVAL_MS) return;
+    s_monitor_ms = now;
+
+    // Snapshot under spinlock so core 1 can't write mid-read.
+    spin_lock_t *sl = spin_lock_instance(HUB_SPINLOCK_ID);
+    uint32_t irq    = spin_lock_blocking(sl);
+    int8_t  lx   = merger_get_output(&s_merger, OUT_LX);
+    int8_t  ly   = merger_get_output(&s_merger, OUT_LY);
+    int8_t  rx   = merger_get_output(&s_merger, OUT_RX);
+    int8_t  ry   = merger_get_output(&s_merger, OUT_RY);
+    int8_t  lt   = merger_get_output(&s_merger, OUT_LT);
+    int8_t  rt   = merger_get_output(&s_merger, OUT_RT);
+    int8_t  relx = merger_get_output(&s_merger, OUT_REL_X);
+    int8_t  rely = merger_get_output(&s_merger, OUT_REL_Y);
+    uint8_t hat  = merger_hat(&s_merger);
+    uint16_t btns = merger_get_buttons_word(&s_merger);
+    spin_unlock(sl, irq);
+
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "mon: lx=%d ly=%d rx=%d ry=%d lt=%d rt=%d relx=%d rely=%d hat=%u btn=%04X\r\n",
+             (int)lx, (int)ly, (int)rx, (int)ry,
+             (int)lt, (int)rt, (int)relx, (int)rely,
+             (unsigned)hat, (unsigned)btns);
+    cdc_puts(buf);
 }
 
 // Process a line from CDC input
@@ -315,6 +351,14 @@ static void process_line(char *line) {
         uint32_t irq    = spin_lock_blocking(sl);
         s_merger.mouse_sensitivity = (uint8_t)s;
         spin_unlock(sl, irq);
+        cdc_puts("ok\r\n");
+
+    } else if (strcmp(argv[0], "monitor") == 0) {
+        if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+            s_monitor_on = false;
+        } else {
+            s_monitor_on = true;
+        }
         cdc_puts("ok\r\n");
 
     } else if (strcmp(argv[0], "reset") == 0) {
@@ -481,6 +525,7 @@ int main(void) {
         gpio_event_task();    // act on any queued button events
         led_status_task();    // keep LED states in sync with hub state
         hid_dispatch_task();
+        cmd_monitor_task();
     }
 
     return 0;
